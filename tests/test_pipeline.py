@@ -84,7 +84,7 @@ def test_stops_when_follow_up_planner_has_nothing_new():
 
     assert result.status is Status.INSUFFICIENT_EVIDENCE
     assert len(search.calls) == 1
-    assert "planner proposed no new queries" in result.notes
+    assert result.trace.of("stop")[0]["reason"] == "no new queries to try"
 
 
 def test_empty_search_results_give_insufficient_evidence_without_writing():
@@ -124,7 +124,7 @@ def test_every_search_failing_is_a_failure_not_missing_evidence():
     assert result.status is Status.FAILED
     assert result.reason == "every search call failed"
     assert len(search.calls) == 3
-    assert sum("UsageLimitExceededError" in n for n in result.notes) == 3
+    assert sum("UsageLimitExceededError" in w for w in result.trace.warnings()) == 3
 
 
 def test_one_search_failing_still_answers_from_the_others():
@@ -134,7 +134,7 @@ def test_one_search_failing_still_answers_from_the_others():
     result = research(Q, llm, search)
 
     assert result.status is Status.ANSWERED
-    assert any("search failed for 'a'" in n for n in result.notes)
+    assert any("search failed for 'a'" in w for w in result.trace.warnings())
 
 
 def test_malformed_search_body_counts_as_a_failed_search():
@@ -145,7 +145,7 @@ def test_malformed_search_body_counts_as_a_failed_search():
     result = research(Q, FakeLLMClient([plan("a"), plan()]), NoResults())
 
     assert result.status is Status.FAILED
-    assert any("no results list" in n for n in result.notes)
+    assert any("no results list" in w for w in result.trace.warnings())
 
 
 def test_planner_failure_falls_back_to_searching_the_question():
@@ -156,7 +156,7 @@ def test_planner_failure_falls_back_to_searching_the_question():
 
     assert result.status is Status.ANSWERED
     assert [c["query"] for c in search.calls] == [Q]
-    assert any("planner failed" in n and "RateLimitError" in n for n in result.notes)
+    assert any("planner failed" in w and "RateLimitError" in w for w in result.trace.warnings())
 
 
 def test_unparseable_planner_output_falls_back_to_the_question():
@@ -217,7 +217,7 @@ def test_claims_still_uncited_after_repair_are_removed():
     assert result.status is Status.ANSWERED
     assert result.answer == "- It supports Kubernetes deployments [1]."
     assert [c.url for c in result.sources] == [THREE_DOMAINS[0]["url"]]
-    assert [n for n in result.notes if n.startswith("removed")] == [
+    assert [w for w in result.trace.warnings() if w.startswith("removed")] == [
         "removed uncited claim: 'Dagster is cheaper for small teams overall.'",
         "removed uncited claim: 'Airflow 3 shipped a new scheduler.'",
     ]

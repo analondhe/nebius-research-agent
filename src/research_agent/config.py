@@ -18,6 +18,11 @@ def use_fakes(env: Mapping[str, str]) -> bool:
     return env.get(USE_FAKES_ENV, "").strip().lower() in {"1", "true", "yes"}
 
 
+def secret_values(env: Mapping[str, str]) -> list[str]:
+    """The configured API keys, for redaction."""
+    return [env[k].strip() for k in REQUIRED_KEYS if env.get(k, "").strip()]
+
+
 def build_clients(env: Mapping[str, str]) -> tuple[LLMClient, SearchClient]:
     if use_fakes(env):
         return FakeLLMClient(), FakeSearchClient()

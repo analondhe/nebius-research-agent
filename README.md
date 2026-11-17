@@ -23,6 +23,7 @@ Code lives in `src/research_agent/`; `src/agent.py` is the CLI.
 - **Citations** (`citations.py`): every key claim (a sentence of 4+ words that isn't a heading or lead-in) must cite a source id that exists. If a draft breaks the rule, the writer gets one repair round. Claims still uncited after that are removed. If no cited claim survives, the answer becomes "not enough evidence". Citations are renumbered in order of first use, and only cited sources are listed.
 - **Safety** (`prompts.py`): instructions live only in system messages. Web text goes into user messages inside `<source>` tags, marked as untrusted. Text that would open or close a tag is neutralized.
 - **Failure handling**: when one search fails the run continues with the other queries. If every search fails, or the writer call fails, the run ends with a clear "Research failed" message instead of a traceback. A failed planner call falls back to searching the question as written.
+- **Research trace** (`trace.py`): every run records each planned query (and any dropped as repeats or over the per-round limit), the results each search returned, whether each source was kept or dropped and why, the evidence check after each round, the stop reason, the writer's citation checks, and the final status. Warnings (failed calls, fallbacks, removed claims) always go to stderr. `--trace` prints the full trace and `--trace-file run.jsonl` saves it as JSON lines. API keys from the environment, and key-shaped strings (`tvly-…`, `Bearer …`, `api_key=…`), are redacted before anything is stored, even when they appear in an error message or in web text.
 - **Trade-offs:** <latency, cost, reliability>
 
 ## Required services
@@ -40,7 +41,7 @@ pip install -r requirements.txt
 cp .env.example .env   # add your keys — never commit them
 python src/agent.py "Should we move from Airflow to Dagster?"
 ```
-Exit codes: `0` answered, `3` not enough evidence, `1` research failed, `2` missing keys.
+Exit codes: `0` answered, `3` not enough evidence, `1` research failed, `2` missing keys. Add `--trace` to see how the answer was researched, or `--trace-file run.jsonl` to save that trace.
 
 ## Tests
 Both services sit behind small interfaces (`LLMClient` in `llm.py`, `SearchClient` in `search.py`). Each has a real implementation and an offline fake that returns the same response bodies as the real APIs. The CLI always uses the real clients and reads the keys from `.env`. Fakes are used only when `RESEARCH_AGENT_USE_FAKES=1` is set.
