@@ -1,21 +1,20 @@
-"""planner -> search -> evidence check (dedupe, drop weak, re-search) -> writer.
+"""planner -> search -> evidence check (dedupe, drop weak, re-search) -> writer -> claim check.
 
 Every step is recorded in a Trace: planned queries, search results, why each
-source was kept or dropped, evidence checks, why searching stopped, and what
-the writer produced.
+source was kept or dropped, evidence checks, why searching stopped, what the
+writer produced, and the verdict on every claim.
 """
 from __future__ import annotations
 
-import json
-import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from enum import Enum
 
 from . import citations, prompts
 from .evidence import EvidenceCheck, EvidencePool, Source, parse_results
-from .llm import LLMClient, LLMError, Message, completion_text
+from .llm import LLMClient, LLMError, Message, completion_text, parse_json
 from .search import SearchClient, SearchError
 from .trace import Trace
+from .verify import PARTIAL, PARTIAL_MARK, SUPPORTED, UNSUPPORTED, UNVERIFIED, UNVERIFIED_MARK, Verification, verify_claims
 
 MAX_QUERY_CHARS = 400  # Tavily rejects longer queries
 
@@ -52,6 +51,7 @@ class ResearchResult:
     sources: list[Citation]
     queries: list[str]
     trace: Trace
+    notices: list[str] = field(default_factory=list)
 
 
 def research(
@@ -230,18 +230,44 @@ class _Run:
 
         if _is_insufficient(draft):
             return self._finish(Status.INSUFFICIENT_EVIDENCE, "", "writer found the sources insufficient", _numbered(sources))
+        uncited: list[str] = []
         if not report.ok:
-            draft, dropped = citations.drop_uncited(draft, n)
-            for claim in dropped:
-                self.trace.warn("claim_removed", f"removed uncited claim: {claim!r}", claim=claim)
+            draft, uncited = citations.drop_uncited(draft, n)
+            for claim in uncited:
+                self.trace.warn("claim_removed", f"removed uncited claim: {claim!r}", claim=claim, reason="no valid citation")
         if not citations.key_claims(draft):
             return self._finish(
                 Status.INSUFFICIENT_EVIDENCE, "", "no claim in the answer had a valid citation", _numbered(sources)
             )
+
+        verification = verify_claims(draft, sources, self.llm)
+        self._trace_verification(verification)
+        draft = verification.text
+        if not citations.key_claims(draft):
+            return self._finish(
+                Status.INSUFFICIENT_EVIDENCE, "", "no claim was supported by its cited sources", _numbered(sources)
+            )
         answer, order = citations.renumber(draft, n)
         cited = [Citation(new, sources[old - 1].title, sources[old - 1].url) for new, old in enumerate(order, 1)]
         not_cited = [s.url for i, s in enumerate(sources, 1) if i not in order]
-        return self._finish(Status.ANSWERED, answer, "", cited, not_cited=not_cited)
+        notice = _claim_check_notice(verification, len(uncited))
+        return self._finish(Status.ANSWERED, answer, "", cited, not_cited=not_cited, notices=[notice])
+
+    def _trace_verification(self, verification: Verification) -> None:
+        if verification.error:
+            self.trace.warn("claim_check", f"claim check failed: {verification.error}; claims left unverified",
+                            error=verification.error)
+            return
+        labels = {SUPPORTED: "supported", PARTIAL: "flagged partly supported", UNVERIFIED: "flagged unverified",
+                  UNSUPPORTED: "removed unsupported claim"}
+        for check in verification.checks:
+            fields = {"claim": check.claim, "cited": check.cited, "verdict": check.verdict,
+                      "supported_by": check.supported_by, "reason": check.reason}
+            message = f"{labels[check.verdict]}: {check.claim!r}" + (f" ({check.reason})" if check.reason else "")
+            if check.verdict == SUPPORTED:
+                self.trace.record("claim_check", message, **fields)
+            else:
+                self.trace.warn("claim_check", message, **fields)
 
     def _trace_draft(self, attempt: int, draft: str, report: citations.CitationReport, n: int) -> None:
         if _is_insufficient(draft):
@@ -256,14 +282,38 @@ class _Run:
                             problems=report.problems())
 
     def _finish(
-        self, status: Status, answer: str, reason: str, sources: list[Citation], not_cited: list[str] | None = None
+        self,
+        status: Status,
+        answer: str,
+        reason: str,
+        sources: list[Citation],
+        not_cited: list[str] | None = None,
+        notices: list[str] | None = None,
     ) -> ResearchResult:
         fields = {"status": status.value, "reason": reason, "sources": [c.url for c in sources]}
         if not_cited is not None:
             fields["not_cited"] = not_cited
         self.trace.record("finished", f"{status.value}" + (f": {reason}" if reason else f" with {len(sources)} cited sources"),
                           **fields)
-        return ResearchResult(self.question, status, answer, reason, sources, list(self.tried), self.trace)
+        return ResearchResult(self.question, status, answer, reason, sources, list(self.tried), self.trace, notices or [])
+
+
+def _claim_check_notice(verification: Verification, uncited: int) -> str:
+    if verification.error:
+        return f"Claim check: could not verify claims against their sources ({verification.error}); treat them as unverified."
+    supported, partial = verification.count(SUPPORTED), verification.count(PARTIAL)
+    unsupported, unverified = verification.count(UNSUPPORTED), verification.count(UNVERIFIED)
+    total = len(verification.checks) + uncited
+    parts = [f"{supported} of {total} key claims fully supported by their cited sources"]
+    if partial:
+        parts.append(f"{partial} marked {PARTIAL_MARK}")
+    if unverified:
+        parts.append(f"{unverified} marked {UNVERIFIED_MARK}")
+    if unsupported:
+        parts.append(f"{unsupported} removed because their sources did not support them")
+    if uncited:
+        parts.append(f"{uncited} removed for lacking a citation")
+    return "Claim check: " + "; ".join(parts) + "."
 
 
 def _result_summary(raw: object) -> dict:
@@ -273,13 +323,7 @@ def _result_summary(raw: object) -> dict:
 
 def parse_queries(text: str) -> list[str]:
     """Queries from {"queries": [...]} or a bare JSON list, tolerating prose or code fences around it."""
-    data = None
-    for candidate in (text, *re.findall(r"\{.*\}|\[.*\]", text, flags=re.DOTALL)):
-        try:
-            data = json.loads(candidate)
-            break
-        except json.JSONDecodeError:
-            continue
+    data = parse_json(text)
     if isinstance(data, dict):
         data = data.get("queries")
     if not isinstance(data, list):
@@ -302,7 +346,8 @@ def _numbered(sources: list[Source]) -> list[Citation]:
 def render(result: ResearchResult) -> str:
     if result.status is Status.ANSWERED:
         refs = "\n".join(f"[{c.id}] {c.title} — {c.url}" for c in result.sources)
-        return f"{result.answer}\n\nSources:\n{refs}"
+        notices = "".join(f"\n\n{n}" for n in result.notices)
+        return f"{result.answer}\n\nSources:\n{refs}{notices}"
     if result.status is Status.INSUFFICIENT_EVIDENCE:
         out = f"Not enough evidence to answer this question.\nReason: {result.reason}."
         if result.sources:

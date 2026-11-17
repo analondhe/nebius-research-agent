@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import random
+import re
 
 from research_agent.search import make_result
 
@@ -23,6 +24,23 @@ def page(url: str, *, score: float = 0.8, title: str | None = None, content: str
 
 def plan(*queries: str) -> str:
     return json.dumps({"queries": list(queries)})
+
+
+_CLAIM_LINE = re.compile(r"^Claim (\d+) \(cites ([\d, ]+)\): (.+)$", re.MULTILINE)
+
+
+def verdicts(*results: tuple) -> str:
+    """Verifier JSON: one (verdict, supporting ids[, reason]) per claim, in claim order."""
+    return json.dumps({"results": [
+        {"claim": n, "verdict": r[0], "sources": r[1], "reason": r[2] if len(r) > 2 else "test"}
+        for n, r in enumerate(results, 1)
+    ]})
+
+
+def all_supported(messages: list[dict]) -> str:
+    """Verifier reply backing every claim with every source it cites."""
+    claims = _CLAIM_LINE.findall(messages[1]["content"])
+    return verdicts(*(("supported", [int(i) for i in ids.split(",")]) for _, ids, _ in claims))
 
 
 THREE_DOMAINS = [

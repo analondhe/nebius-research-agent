@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from helpers import THREE_DOMAINS, page, plan
+from helpers import THREE_DOMAINS, all_supported, page, plan
 
 import agent
 from research_agent.config import USE_FAKES_ENV
@@ -21,6 +21,7 @@ def test_trace_follows_a_run_from_plan_to_stop_reason():
         plan("dagster docs"),
         plan("dagster docs", "airflow changelog"),
         "Both tools schedule data pipelines today [1][2].",
+        all_supported,
     ])
     search = FakeSearchClient({
         "dagster docs": [THREE_DOMAINS[0], page("https://spam.example.com", score=0.05)],
@@ -34,7 +35,7 @@ def test_trace_follows_a_run_from_plan_to_stop_reason():
         "run_started",
         "plan", "search", "source", "source", "evidence_check",
         "refine", "search", "source", "source", "source", "evidence_check",
-        "stop", "writer", "finished",
+        "stop", "writer", "claim_check", "finished",
     ]
     assert trace.of("plan")[0]["queries"] == ["dagster docs"]
     assert trace.of("refine")[0]["queries"] == ["airflow changelog"]
@@ -69,7 +70,7 @@ def test_trace_records_round_limit_as_stop_reason():
 
 
 def test_trace_records_queries_cut_by_the_per_round_limit():
-    llm = FakeLLMClient([plan("a", "b", "c"), "Answer sentence with enough words [1]."])
+    llm = FakeLLMClient([plan("a", "b", "c"), "Answer sentence with enough words [1].", all_supported])
     result = research(Q, llm, FakeSearchClient({"a": THREE_DOMAINS}), AgentConfig(max_queries=2))
 
     assert result.trace.of("plan")[0]["queries"] == ["a", "b"]
@@ -93,7 +94,7 @@ def test_trace_flags_failures_and_fallbacks_as_warnings():
 def test_api_keys_never_reach_the_trace():
     trace = Trace(secrets=[NEBIUS_KEY, TAVILY_KEY])
     leaky_page = page("https://a.io/x", title=f"debug dump api_key={NEBIUS_KEY}")
-    llm = FakeLLMClient([LLMError(f"401 for key {NEBIUS_KEY}"), "Answer sentence with enough words [1]."])
+    llm = FakeLLMClient([LLMError(f"401 for key {NEBIUS_KEY}"), "Answer sentence with enough words [1].", all_supported])
     search = FakeSearchClient({
         f"{Q} {TAVILY_KEY}": [leaky_page, *THREE_DOMAINS],
     })

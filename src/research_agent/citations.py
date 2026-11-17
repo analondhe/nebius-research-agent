@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Callable
 
 _CITE = r"\[\d+(?:\s*,\s*\d+)*\]"
 CITATION = re.compile(_CITE)
@@ -35,20 +36,37 @@ def is_key_claim(sentence: str) -> bool:
     return not plain.endswith(":") and len(plain.split()) >= _MIN_CLAIM_WORDS
 
 
-def _claim_lines(text: str) -> list[tuple[str, str]]:
-    """(bullet prefix, body) for each line that can hold claims."""
-    lines = []
+def rewrite_claims(text: str, rewrite: Callable[[str], str | None]) -> str:
+    """Pass every key claim, in order, through `rewrite`; None removes the claim.
+    Headings, blank lines and short non-claim sentences are left as they are."""
+    out = []
     for line in text.splitlines():
         if not line.strip() or line.lstrip().startswith("#"):
+            out.append(line)
             continue
         bullet = _BULLET.match(line)
         prefix = bullet.group(0) if bullet else ""
-        lines.append((prefix, line[len(prefix) :]))
-    return lines
+        kept = []
+        for sentence in split_sentences(line[len(prefix) :]):
+            if is_key_claim(sentence):
+                sentence = rewrite(sentence)
+                if sentence is None:
+                    continue
+            kept.append(sentence)
+        if kept:
+            out.append(prefix + " ".join(kept))
+    return re.sub(r"\n{3,}", "\n\n", "\n".join(out)).strip()
 
 
 def key_claims(text: str) -> list[str]:
-    return [s for _, body in _claim_lines(text) for s in split_sentences(body) if is_key_claim(s)]
+    claims: list[str] = []
+
+    def collect(sentence: str) -> str:
+        claims.append(sentence)
+        return sentence
+
+    rewrite_claims(text, collect)
+    return claims
 
 
 @dataclass
@@ -78,33 +96,27 @@ def check(text: str, n_sources: int) -> CitationReport:
     return report
 
 
-def _keep_valid_ids(text: str, n_sources: int) -> str:
+def keep_ids(text: str, allowed: Callable[[int], bool]) -> str:
+    """Drop citation ids that fail `allowed`, and any citation group left empty."""
+
     def repl(match: re.Match[str]) -> str:
-        ids = [i for i in cited_ids(match.group(0)) if 1 <= i <= n_sources]
+        ids = [i for i in cited_ids(match.group(0)) if allowed(i)]
         return "".join(f"[{i}]" for i in dict.fromkeys(ids))
 
-    stripped = CITATION.sub(repl, text)
-    return re.sub(r"[ \t]+([.,;:!?])", r"\1", stripped)
+    return re.sub(r"[ \t]+([.,;:!?])", r"\1", CITATION.sub(repl, text))
 
 
 def drop_uncited(text: str, n_sources: int) -> tuple[str, list[str]]:
     """Remove ids that point nowhere, then every key claim left without a citation."""
-    kept_lines, dropped = [], []
-    for line in text.splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            kept_lines.append(line)
-            continue
-        bullet = _BULLET.match(line)
-        prefix = bullet.group(0) if bullet else ""
-        kept = []
-        for sentence in split_sentences(_keep_valid_ids(line[len(prefix) :], n_sources)):
-            if is_key_claim(sentence) and not cited_ids(sentence):
-                dropped.append(sentence)
-            else:
-                kept.append(sentence)
-        if kept:
-            kept_lines.append(prefix + " ".join(kept))
-    return re.sub(r"\n{3,}", "\n\n", "\n".join(kept_lines)).strip(), dropped
+    dropped: list[str] = []
+
+    def keep_if_cited(sentence: str) -> str | None:
+        if cited_ids(sentence):
+            return sentence
+        dropped.append(sentence)
+        return None
+
+    return rewrite_claims(keep_ids(text, lambda i: 1 <= i <= n_sources), keep_if_cited), dropped
 
 
 def renumber(text: str, n_sources: int) -> tuple[str, list[int]]:

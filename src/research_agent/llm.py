@@ -90,6 +90,16 @@ def completion_text(body: dict[str, Any]) -> str:
     return content.strip()
 
 
+def parse_json(text: str) -> Any:
+    """The JSON value in model output, tolerating prose or code fences around it."""
+    for candidate in (text, *re.findall(r"\{.*\}|\[.*\]", text, flags=re.DOTALL)):
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    raise ValueError("model output contains no JSON")
+
+
 def make_chat_completion(content: str, *, model: str, prompt_tokens: int = 0) -> dict[str, Any]:
     """A `chat.completion` body with every field the Token Factory schema marks required."""
     completion_tokens = len(content.split())
@@ -157,6 +167,8 @@ class FakeLLMClient:
 
 _QUESTION_LINE = re.compile(r"^Question: (.+)$", re.MULTILINE)
 _SOURCE_BLOCK = re.compile(r"<source id=\"(\d+)\"[^>]*>\n(.*?)\n</source>", re.DOTALL)
+_CLAIM_LINE = re.compile(r"^Claim (\d+) \(cites ([\d, ]+)\): (.+)$", re.MULTILINE)
+_WORD = re.compile(r"[a-z0-9]+")
 
 
 def rule_based_reply(messages: list[Message]) -> str:
@@ -173,4 +185,18 @@ def rule_based_reply(messages: list[Message]) -> str:
             first_sentence = re.split(r"(?<=[.!?])\s", content.strip(), maxsplit=1)[0].rstrip(".!?")
             claims.append(f"{first_sentence} [{sid}].")
         return " ".join(claims) if claims else prompts.INSUFFICIENT_EVIDENCE
+    if system == prompts.VERIFIER_SYSTEM:
+        return _lexical_verdicts(messages[1]["content"])
     raise AssertionError("FakeLLMClient got a prompt it does not recognise")
+
+
+def _lexical_verdicts(user: str) -> str:
+    """Supported when most of a claim's words appear in one cited source."""
+    texts = {int(sid): set(_WORD.findall(content.lower())) for sid, content in _SOURCE_BLOCK.findall(user)}
+    results = []
+    for n, ids, claim in _CLAIM_LINE.findall(user):
+        words = set(_WORD.findall(claim.lower()))
+        backing = [i for i in map(int, ids.split(",")) if words and len(words & texts.get(i, set())) / len(words) >= 0.6]
+        verdict = "supported" if backing else "unsupported"
+        results.append({"claim": int(n), "verdict": verdict, "sources": backing, "reason": "word overlap"})
+    return json.dumps({"results": results})
