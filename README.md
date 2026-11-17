@@ -8,7 +8,20 @@
 - **Team:** <names / GitHub handles>
 
 ## The problem
-<Who is the user? What research task does the agent help them finish? Why does it matter?>
+**Who it's for:** data engineers and platform teams deciding whether to adopt, replace or upgrade a tool in their stack. For example, an orchestrator, a warehouse, an ingestion service or a table format.
+
+**The research task:** answering a question like *"Should we move from Airflow to Dagster?"* or *"Is it worth switching from Fivetran to Airbyte for 200 connectors?"*. A good answer pulls from:
+- official documentation, for what each tool actually supports and how it's deployed;
+- changelogs and release notes, for what changed recently, what's deprecated and what breaks on upgrade;
+- pricing pages, for how each tool bills and where the plan limits are.
+
+The agent plans the searches, collects those sources, drops weak and duplicate ones, searches again when there are gaps, and writes a short answer in which every key claim links to the page it came from. When the sources don't support an answer, it says so instead of guessing.
+
+**Why it matters:**
+- **The facts change fast.** Features ship, defaults change and pricing tiers get reworked from one release to the next. Last year's blog post or a model's training data is often out of date, and the decision has to rest on the current docs.
+- **The cost of getting it wrong is high.** A migration takes weeks of engineering time. One wrong claim about a missing feature, a breaking change or a price can send a team down the wrong path.
+- **Decisions need receipts.** A recommendation goes to teammates, managers and procurement. Each claim needs a source someone can open and check, not a confident paragraph with no links.
+- **Doing it by hand is slow.** Comparing two tools means reading dozens of docs pages, changelogs and pricing tables, and cross-checking them. This agent does that first pass for you and shows its work, through citations and the research trace, so a reviewer can verify it.
 
 ## How it works
 ```
